@@ -1,0 +1,8 @@
+apply plugin: 'java'
+repositories { jcenter()}
+dependencies{
+   compile 'org.apache.camel:camel-core:2.21.0'
+   compile 'org.apache.camel:camel-bindy:2.21.0'
+   compile "ch.qos.logback:logback-classic:1.2.3"
+   testCompile 'junit:junit:4.12'
+}
