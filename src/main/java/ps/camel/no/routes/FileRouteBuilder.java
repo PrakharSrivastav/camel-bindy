@@ -6,8 +6,10 @@ import org.apache.camel.dataformat.bindy.fixed.BindyFixedLengthDataFormat;
 import org.apache.camel.spi.DataFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ps.camel.no.aggregation.CombineInfoStrategy;
 import ps.camel.no.beans.RecordFilterBean;
-import ps.camel.no.model.Basic;
+import ps.camel.no.model.ADTR;
+import ps.camel.no.model.GRUI;
 
 public class FileRouteBuilder extends RouteBuilder {
     Logger logger = LoggerFactory.getLogger(FileRouteBuilder.class);
@@ -15,44 +17,55 @@ public class FileRouteBuilder extends RouteBuilder {
     @Override
     public void configure() throws Exception {
 
-        DataFormat bindy = new BindyFixedLengthDataFormat(Basic.class);
+        DataFormat bindyGRUI = new BindyFixedLengthDataFormat(GRUI.class);
+        DataFormat bindyADRT = new BindyFixedLengthDataFormat(ADTR.class);
 
         this.logger.info(getCurrentWorkingDirectory());
 
 
         // Split each line of the file as string
         from("file://" + getCurrentWorkingDirectory() + "?noop=true")
+                .routeId("Splitter")
                 .marshal().string("UTF-8")
                 .split(body().tokenize(System.lineSeparator()))
                 .streaming()
+                // Filter away all {"IHF","IAF","RAF"} records
                 .filter().simple("${bean:manageRouteBean?method=shouldProcess}")
+                // Send to next step
                 .to("seda:splitByProductType");
 
-
+        // For each line find the correct product type GRUI or ADRT and send to next step
         from("seda:splitByProductType")
-                // choice
+                .routeId("ProductSplitter")
                 .choice()
-                // when GRUI then to seda:joiner
-                .when(method(RecordFilterBean.class, "getProductType").isEqualTo("GRUI")).to("seda:aggregator")
-                // when ADTR then to seda:joiner
-                // otherwise end
+                .when(method(RecordFilterBean.class, "getProductType").isEqualTo("GRUI"))
+                .to("seda:GRUIConverter")
+                .when(method(RecordFilterBean.class, "getProductType").isEqualTo("ADRT"))
+                .to("seda:ADTRConverter")
                 .otherwise()
-                // then aggregate using some keys
-                // create a common message
-                // push to target
-
-//                .unmarshal(bindy)
-//                .convertBodyTo(String.class)
-//                .routeId("fileRouteBuider")
-//                .log(LoggingLevel.INFO, logger, "Processing file ${file:name}")
-//                .log(LoggingLevel.INFO, logger, "content ${body}")
                 .log("***********************")
                 .end();
 
-        from("seda:aggregator")
-                .unmarshal(bindy)
-                .convertBodyTo(String.class)
-                .log(LoggingLevel.INFO, logger, "Hello ${body}");
+        // Properly parse GRUI records
+        from("seda:GRUIConverter")
+                .routeId("GRUIConverter")
+                .unmarshal(bindyGRUI)
+                .bean(RecordFilterBean.class, "stampGRUIHeader(${exchange})")
+                .to("seda:finalMessage");
+
+        // Properly parse ADRT records
+        from("seda:ADTRConverter")
+                .routeId("ADTRConverter")
+                .unmarshal(bindyADRT)
+                .bean(RecordFilterBean.class, "stampADTRHeader(${exchange})")
+                .to("seda:finalMessage");
+
+        // Join these records
+        from("seda:finalMessage")
+                .routeId("finalMessage")
+                .aggregate(header("egenId"), new CombineInfoStrategy()).completionTimeout(100).completionTimeoutCheckerInterval(10)
+//                .convertBodyTo(String.class)
+                .log(LoggingLevel.INFO, logger, "${headers}");
     }
 
     private String getCurrentWorkingDirectory() {
